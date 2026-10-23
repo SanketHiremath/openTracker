@@ -2,6 +2,9 @@ build/
 build-*/
 CLAUDE.md
 .claude/
+local.conf
+*.md
+docs/superpowers/
 *.pyc
 __pycache__/
 .DS_Store
