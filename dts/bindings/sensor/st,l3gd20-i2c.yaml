@@ -1,0 +1,7 @@
+# SPDX-License-Identifier: Apache-2.0
+
+description: STMicroelectronics L3GD20 3-axis gyroscope accessed through I2C
+
+compatible: "st,l3gd20"
+
+include: ["i2c-device.yaml", "st,l3gd20-common.yaml"]

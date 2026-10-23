@@ -1,0 +1,71 @@
+# Quectel EG916Q-GL modem driver (AT UART only -- GNSS is handled by the
+# in-tree gnss-nmea-generic driver on the module's separate GNSS UART).
+
+config MODEM_QUECTEL_EG916Q
+	bool "Quectel EG916Q-GL modem driver"
+	select MODEM_MODULES
+	select MODEM_CHAT
+	select MODEM_BACKEND_UART
+	select RING_BUFFER
+	select GPIO
+	help
+	  Devicetree-bound driver (compatible = "quectel,eg916q") for the
+	  EG916Q-GL's AT UART -- no CMUX, since this board's GNSS is already
+	  on a separate UART and nothing needs concurrent AT access. Talks AT
+	  commands only: networking uses the module's own embedded TCP/IP and
+	  MQTT-over-TLS AT-command stack (AT+QIACT/AT+QMTOPEN/AT+QMTCONN/
+	  AT+QMTPUBEX/AT+QSSLCFG/AT+QFUPL), not PPP, so this driver has no PPP
+	  dependency at all. Built on Zephyr's public modem_chat/modem_pipe/
+	  modem_backend_uart primitives; independent of CONFIG_MODEM_CELLULAR.
+
+if MODEM_QUECTEL_EG916Q
+
+config MODEM_QUECTEL_EG916Q_APN
+	string "APN"
+	default "internet"
+	help
+	  Set to your SIM carrier's APN. Baked into the init chat script's
+	  AT+CGDCONT command at compile time.
+
+config MODEM_QUECTEL_EG916Q_UART_BUFFER_SIZE
+	int "UART backend receive/transmit buffer size"
+	default 512
+
+config MODEM_QUECTEL_EG916Q_POWER_PULSE_MS
+	int "PWRKEY pulse duration (ms)"
+	default 10000
+	help
+	  Confirmed against the EG916Q-GL hardware design manual: PWRKEY
+	  must be held low for at least 10s to power on the module.
+
+config MODEM_QUECTEL_EG916Q_STARTUP_TIME_MS
+	int "Wait after the power pulse before sending AT commands (ms)"
+	default 10000
+
+config MODEM_QUECTEL_EG916Q_SELFTEST_RETRIES
+	int "Self-test AT command retry attempts"
+	default 5
+	help
+	  eg916q_selftest() retries "AT" this many times, 5s apart, before
+	  giving up. The fixed STARTUP_TIME_MS wait in eg916q_power_on() is
+	  only a best-effort estimate of when the module is done booting, so
+	  the self-test needs to keep trying a bit past it rather than
+	  failing on a single attempt.
+
+config MODEM_QUECTEL_EG916Q_REGISTER_TIMEOUT_S
+	int "Network registration timeout (s)"
+	default 60
+	help
+	  Upper bound on how long the driver polls AT+CEREG?/AT+CGREG? for
+	  a registered state before giving up with -ETIMEDOUT. 60s matches
+	  the TCP/IP app note's flow chart ("Query PS service in 60s").
+
+config MODEM_QUECTEL_EG916Q_INIT_PRIORITY
+	int "Driver init priority"
+	default 90
+
+module = MODEM_QUECTEL_EG916Q
+module-str = modem_quectel_eg916q
+source "subsys/logging/Kconfig.template.log_config"
+
+endif # MODEM_QUECTEL_EG916Q

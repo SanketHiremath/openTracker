@@ -1,0 +1,210 @@
+/*
+ * Car tracker board overlay for Pro Micro nRF52840.
+ *
+ * GPS (M1): NEO-6M on uart0 (enabled by the board) as a generic NMEA
+ * device. NEO-6M wiring: GPS TX -> nRF RX, GPS RX -> nRF TX, common GND,
+ * GPS VCC from 3.3V. uart0 uses the board's default pinctrl, P0.09 (TX) /
+ * P0.10 (RX) -- these are also the NFC1/NFC2 pins, freed for GPIO/UART
+ * use by the board's `nfct-pins-as-gpios` UICR setting.
+ *
+ * Cellular modem (M2): Quectel EG916Q-GL on uart1, added below. uart1 is
+ * not enabled by the board by default, so both the peripheral and its
+ * pinctrl states are defined here. Driven by the out-of-tree driver at
+ * drivers/modem/quectel_eg916q.c. TX/RX only -- RTS/CTS are not wired on
+ * this board, so hardware flow control is disabled.
+ *
+ * Pin selection: the pins below (P0.06/08, P0.19/24) are picked because
+ * they are NOT claimed by anything else in this board's default
+ * devicetree (uart0, i2c0, i2c1, spi2, pwm0/led0, the P0.18 reset pin,
+ * or the P0.00/P0.01 32kHz crystal) and are not ADC-only pins -- P0.02/
+ * 03/04/05/28-31 are left free for a future battery-voltage ADC input.
+ * "promicro_nrf52840" covers several physically different clone boards
+ * (see the board doc), so before wiring, confirm these nRF52840 GPIO
+ * numbers against the silkscreen/pinout diagram for your specific board.
+ */
+
+/* A/B (direct-XIP) flash layout + retained boot-mode byte. Shared verbatim
+ * with the MCUboot build -- see ../proMicro_bootloader/PLAN.md.
+ */
+#include <zephyr/dt-bindings/gpio/gpio.h>
+#include <zephyr/dt-bindings/pinctrl/nrf-pinctrl.h>
+#include "../proMicro_bootloader/dts/promicro_ab_partitions.dtsi"
+
+/* Switchable supply rails, cut by the power task before System OFF (see
+ * src/tasks/power_task.cpp) and brought back by the regulator driver at boot
+ * (regulator-boot-on). Both DISABLED: the board has no switches yet, and a
+ * disabled node costs nothing and claims no pin. When you add one, set
+ * enable-gpios to the pin you wired and change status to "okay".
+ *
+ *   rail_3v3    the whole 3.3 V line fed from the MCU board's 3V3 pin to
+ *               everything downstream of it (the GPS today). The accelerometer
+ *               is NOT on it -- it has its own always-on supply, which is what
+ *               lets this rail be cut at all, since the IMU is the wake source.
+ *               The MCU stays powered: it is NOT fed through this switch.
+ *   modem_vbat  the cellular module's VBAT, 3.3-4.3 V (3.8 V typical) with ~2 A
+ *               transmit peaks.
+ *
+ * Hardware to add, one switch per rail:
+ *   - A high-side load switch or P-channel MOSFET in series with the rail,
+ *     enable input driven by the nRF pin, with an external pull-DOWN on that
+ *     input so the rail stays off while the MCU is in reset or System OFF (the
+ *     nRF holds a driven pin's level through System OFF, but a pin that is
+ *     still floating during reset would glitch the rail on).
+ *   - Modem: >= 3 A rating and low Rds(on); a drop at the switch browns the
+ *     module out mid-transmit. Check what voltage you actually feed it.
+ *   - 3V3 line: size it for everything downstream of it.
+ * Nothing the MCU drives may still face a cut load: a pin left driving an
+ * unpowered chip back-powers it through its input protection diode. The power
+ * task already releases the GPS UART and modem UART/control pins; if you hang
+ * anything else off the 3V3 line that has an MCU pin to it, add that pin to
+ * cut_switched_rails() in power_task.cpp.
+ * Consequences: the GPS loses its backup RAM (V_BCKP is on the same rail on
+ * typical breakouts), so every wake is a cold start -- minutes to a first fix,
+ * not seconds, unless V_BCKP has its own supply. The enable pins below are
+ * placeholders: confirm them against your board's silkscreen first (P0.17 and
+ * P0.15 are unused by everything else in this file).
+ */
+/ {
+	rail_3v3: rail-3v3 {
+		compatible = "regulator-fixed";
+		regulator-name = "rail-3v3";
+		enable-gpios = <&gpio0 17 GPIO_ACTIVE_HIGH>;
+		regulator-boot-on;
+		startup-delay-us = <50000>;
+		status = "disabled";
+	};
+
+	modem_vbat: modem-vbat {
+		compatible = "regulator-fixed";
+		regulator-name = "modem-vbat";
+		enable-gpios = <&gpio0 15 GPIO_ACTIVE_HIGH>;
+		regulator-boot-on;
+		startup-delay-us = <50000>;
+		status = "disabled";
+	};
+};
+
+/ {
+	aliases {
+		rail-3v3 = &rail_3v3;
+		modem-power = &modem_vbat;
+		gnss = &gnss;
+		modem = &modem;
+		accel0 = &lsm303dlhc_accel;
+		magn0 = &lsm303dlhc_magn;
+		gyro0 = &l3gd20;
+	};
+};
+
+/* Motion sensors (M3): LSM303DLHC accelerometer + magnetometer and an L3GD20
+ * gyroscope, all on the board's i2c0 (SDA P1.00, SCL P0.11), which the board
+ * enables and nothing else used. On nRF52840 TWIM0 shares no peripheral ID
+ * with UARTE0 (id 2) or UARTE1 (id 40), so GPS and the modem are unaffected.
+ * Addresses: accel 0x19 and magnetometer 0x1E are fixed by the part; the
+ * gyro is 0x6A with its SDO pin tied low, 0x6B tied high -- match whichever
+ * your breakout does.
+ *
+ * Accel INT1 is on P1.06. The board assigns that pin to i2c1 as its SCL, and
+ * i2c1's pinctrl is applied at boot whether or not anything uses the bus, so
+ * i2c1 is disabled here -- nothing uses it, and without this it would
+ * reclaim P1.06 from the interrupt input. (Also frees P1.04, its SDA.)
+ *
+ * The accelerometer node must list "st,lis2dh" first: the driver matches
+ * that compatible, and with only "st,lsm303dlhc-accel" it never binds.
+ */
+&i2c1 {
+	status = "disabled";
+};
+
+&i2c0 {
+	status = "okay";
+
+	lsm303dlhc_accel: lsm303dlhc-accel@19 {
+		compatible = "st,lis2dh", "st,lsm303dlhc-accel";
+		reg = <0x19>;
+		irq-gpios = <&gpio1 6 GPIO_ACTIVE_HIGH>;
+		anym-on-int1;
+		/* 3 == LEVEL_HIGH. With anym-on-int1 the driver binds irq-gpios[0]
+		 * to its "INT2" code path and takes the GPIO mode from
+		 * int2-gpio-config (lis2dh_trigger.c), so int1-gpio-config would
+		 * be silently ignored. Level, not edge: the driver re-arms without
+		 * reading INT1_SRC, so a line already latched high at re-arm has no
+		 * new edge and an edge-triggered input would never fire again.
+		 */
+		int2-gpio-config = <3>;
+		status = "okay";
+	};
+
+	lsm303dlhc_magn: lsm303dlhc-magn@1e {
+		compatible = "st,lsm303dlhc-magn";
+		reg = <0x1e>;
+		status = "okay";
+	};
+
+	/* Gyro disabled for now: its driver failed to init on first power-up
+	 * (accel and magnetometer on the same bus were fine), cause not yet
+	 * diagnosed -- wiring, the 0x6A/0x6B SDO strap, or WHO_AM_I. Node kept so
+	 * re-enabling is a one-word change; with it disabled CONFIG_L3GD20
+	 * drops out and imu_task.cpp skips it.
+	 */
+	l3gd20: l3gd20@6a {
+		compatible = "st,l3gd20";
+		reg = <0x6a>;
+		status = "disabled";
+	};
+};
+
+&uart0 {
+	status = "okay";
+	current-speed = <9600>;   /* NEO-6M factory default */
+	pinctrl-names = "default", "sleep";
+
+	gnss: gnss-nmea-generic {
+		compatible = "gnss-nmea-generic";
+	};
+};
+
+&pinctrl {
+	uart1_default: uart1_default {
+		group1 {
+			psels = <NRF_PSEL(UART_TX, 0, 6)>;
+		};
+		group2 {
+			psels = <NRF_PSEL(UART_RX, 0, 8)>;
+			bias-pull-up;
+		};
+	};
+
+	uart1_sleep: uart1_sleep {
+		group1 {
+			psels = <NRF_PSEL(UART_TX, 0, 6)>,
+				<NRF_PSEL(UART_RX, 0, 8)>;
+			low-power-enable;
+		};
+	};
+};
+
+&uart1 {
+	compatible = "nordic,nrf-uarte";
+	status = "okay";
+	current-speed = <115200>;
+	pinctrl-0 = <&uart1_default>;
+	pinctrl-1 = <&uart1_sleep>;
+	pinctrl-names = "default", "sleep";
+
+	modem: modem {
+		compatible = "quectel,eg916q";
+		/* Same nRF GPIO pin numbers as the SARA-R5 this replaces --
+		 * confirm against the EG916Q-GL carrier board's actual wiring
+		 * before powering anything up (see this file's header comment
+		 * on pin selection). PWRKEY polarity confirmed active-low
+		 * against the EG916Q-GL hardware design manual. RESET_N is
+		 * assumed active-low by "_N" naming convention, not yet
+		 * independently confirmed the same way -- check before relying
+		 * on it.
+		 */
+		mdm-power-gpios = <&gpio0 24 GPIO_ACTIVE_LOW>;
+		mdm-reset-gpios = <&gpio0 19 GPIO_ACTIVE_LOW>;
+		status = "okay";
+	};
+};

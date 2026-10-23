@@ -1,0 +1,27 @@
+description: |
+  Quectel EG916Q-GL LTE Cat 1 + GNSS modem, AT/PPP UART.
+
+  This binds only the module's AT/PPP UART (used for cellular). The
+  module's separate, dedicated GNSS UART is unrelated to this binding --
+  it streams plain NMEA-0183 and is described by the in-tree
+  gnss-nmea-generic binding instead, same as it was for the NEO-6M this
+  module replaced.
+
+compatible: "quectel,eg916q"
+
+include: uart-device.yaml
+
+properties:
+  mdm-power-gpios:
+    type: phandle-array
+    required: true
+    description: |
+      PWRKEY pin. Pulsed active for CONFIG_MODEM_QUECTEL_EG916Q_POWER_PULSE_MS
+      to power the module on; driven inactive to power it off.
+
+  mdm-reset-gpios:
+    type: phandle-array
+    description: |
+      Optional RESET_N pin for a hard reset. Not driven during normal
+      power-on/power-off; the driver only configures it as an inactive
+      output at init.

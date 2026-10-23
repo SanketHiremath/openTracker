@@ -1,0 +1,27 @@
+# ST L3GD20 3-axis gyroscope driver (I2C or SPI).
+#
+# Gated three ways, so merely having this file in the tree changes nothing:
+#   - DT_HAS_ST_L3GD20_ENABLED: some devicetree node must actually use
+#     compatible = "st,l3gd20" (none does until an overlay adds one);
+#   - SENSOR: the sensor subsystem must be on (prj_gps_only.conf leaves it
+#     off, which is what keeps this driver out of that build);
+#   - the CMake side compiles the source only if this symbol is set.
+
+config L3GD20
+	bool "L3GD20 three-axis gyroscope"
+	default y
+	depends on DT_HAS_ST_L3GD20_ENABLED
+	depends on SENSOR
+	select I2C if $(dt_compat_on_bus,$(DT_COMPAT_ST_L3GD20),i2c)
+	select SPI if $(dt_compat_on_bus,$(DT_COMPAT_ST_L3GD20),spi)
+	help
+	  Out-of-tree driver for the STMicroelectronics L3GD20 gyroscope, bound
+	  to devicetree nodes with compatible = "st,l3gd20" on an I2C or SPI
+	  bus. Self-contained: no dependency on ST's hal_st module. Polled
+	  (sample_fetch/channel_get) only; the data-ready/FIFO interrupts are not
+	  implemented. Reports SENSOR_CHAN_GYRO_{X,Y,Z,XYZ} in rad/s, per the
+	  Zephyr sensor API convention.
+
+	  The L3GD20H and I3G4250D are NOT supported (different WHO_AM_I and, for
+	  the L3GD20H, register layout); the driver refuses to bind to them.
+	  The I3G4250D has its own in-tree driver (st,i3g4250d).

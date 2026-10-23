@@ -1,0 +1,135 @@
+# Config options for the car_tracker application
+
+mainmenu "Car GPS anti-theft tracker"
+
+config CAR_TRACKER_GPS_ONLY
+	bool "GPS-only bring-up test"
+	default n
+	help
+	  Builds main() to just initialize GPS and log fixes to the console --
+	  no cellular modem or MQTT code is compiled in at all. Use this for
+	  hardware bring-up while only the NEO-6M is wired up, before the
+	  cellular modem is connected. Flip back to n for the full tracker.
+
+config CAR_TRACKER_BLE_TELEMETRY
+	bool "Expose GPS speed and vibration frequency as GATT characteristics"
+	default n
+	depends on BT_PERIPHERAL
+	select BT_SMP
+	select BT_FIXED_PASSKEY
+	help
+	  Adds a custom GATT service with two read/notify characteristics: GPS
+	  speed and the accelerometer's dominant vibration frequency (see
+	  ble_task.cpp for the encoding).
+
+	  SECURITY: speed is derived position data. Advertising is unauthenticated
+	  broadcast and never carries it. These characteristics instead require an
+	  authenticated, encrypted link (passkey pairing, below), for reads and for
+	  notification subscription alike, so a stranger who merely connects
+	  cannot read them. This relaxes the project's "no speed over BLE" rule
+	  only as far as that protection holds -- it is only as strong as the
+	  passkey is secret.
+
+config CAR_TRACKER_BLE_PASSKEY
+	int "Fixed pairing passkey (0-999999)"
+	range 0 999999
+	default 123456
+	depends on CAR_TRACKER_BLE_TELEMETRY
+	help
+	  The 6-digit code a phone must be given to pair. A fixed value because
+	  the device has no display or keypad. PLACEHOLDER: this default sits in
+	  source control, so change it (and move it out of the repo) before the
+	  device leaves the bench -- anyone who knows it can pair. It is never
+	  logged.
+
+config CAR_TRACKER_APP_LOGS
+	bool "Log from the application's own modules"
+	default y
+	help
+	  When disabled, every ct_* log module is compiled at level NONE, so
+	  only other log sources (e.g. the thread analyzer) remain. Does not
+	  affect Zephyr subsystems; set CONFIG_LOG_DEFAULT_LEVEL for those.
+
+config CAR_TRACKER_IDLE_SLEEP
+	bool "Enter System OFF after a period with no IMU motion"
+	default n
+	depends on SENSOR && HAS_POWEROFF
+	select POWEROFF
+	help
+	  After kIdleSleepMs (app_config.hpp) without an
+	  accelerometer motion interrupt, quiesce the peripherals and put the
+	  nRF52840 into System OFF. The only wake source is the accelerometer's
+	  INT1 line (P1.06); a wake is a full reboot through MCUboot. The device
+	  refuses to sleep unless that wake source has been verified quiet and
+	  armed, so a dead or unwired IMU can never leave it asleep for good.
+
+	  Disable this while debugging: sleeping drops the USB console and the
+	  SWD debug session along with everything else.
+
+config CAR_TRACKER_MQTT_BROKER_HOSTNAME
+	string "MQTT broker hostname or IP"
+	default "mqtt3.thingspeak.com"
+	help
+	  ThingSpeak's MQTT broker. Port 1883 (plaintext) is also offered, but
+	  TLS is used here regardless (see CAR_TRACKER_MQTT_BROKER_PORT).
+
+config CAR_TRACKER_MQTT_BROKER_PORT
+	int "MQTT broker port"
+	default 8883
+	help
+	  8883 = MQTT over TLS. ThingSpeak also offers plaintext MQTT on 1883,
+	  but a car tracker's location/telemetry data should never go out
+	  unencrypted, so this stays on 8883 regardless of what the broker
+	  permits.
+
+config CAR_TRACKER_MQTT_USERNAME
+	string "MQTT username"
+	default "CHANGE_ME"
+	help
+	  ThingSpeak MQTT device credential. Required -- most brokers
+	  (including ThingSpeak) reject CONNECT packets with no username/
+	  password. PLACEHOLDER: set the real value via a local, non-committed
+	  config overlay, not this default.
+
+config CAR_TRACKER_MQTT_PASSWORD
+	string "MQTT password"
+	default "CHANGE_ME"
+	help
+	  ThingSpeak MQTT device credential (its API "MQTT Password"), paired
+	  with CAR_TRACKER_MQTT_USERNAME above. PLACEHOLDER: set the real value
+	  via a local, non-committed config overlay -- never put the live
+	  credential in this Kconfig default, since it lives in source control.
+
+config CAR_TRACKER_MQTT_CLIENT_ID
+	string "MQTT client id"
+	default "CHANGE_ME"
+	help
+	  ThingSpeak ties each MQTT device credential to a specific Client ID
+	  (shown alongside the username/password in the ThingSpeak MQTT API
+	  device settings) -- CONNECT is rejected if this doesn't match
+	  exactly, regardless of whether the username/password are correct.
+
+config CAR_TRACKER_MQTT_TOPIC
+	string "MQTT publish topic"
+	default "channels/3518381/publish"
+	help
+	  ThingSpeak's channel-write topic: "channels/<channel id>/publish".
+	  The payload format ThingSpeak expects on this topic (field1=...&
+	  field2=...&...) is built in cellular_task.cpp, not here -- this is
+	  only the MQTT-level destination.
+
+rsource "drivers/modem/Kconfig"
+
+source "Kconfig.zephyr"
+
+# Deliberately AFTER Kconfig.zephyr, unlike the modem driver above. This
+# driver's `select I2C/SPI if $(dt_compat_on_bus,$(DT_COMPAT_ST_L3GD20),...)`
+# uses a $(...) macro, which Kconfig expands eagerly at parse time, and
+# DT_COMPAT_ST_L3GD20 is only defined once Kconfig.zephyr has pulled in the
+# generated Kconfig.dts. Sourced any earlier, the variable is empty, the
+# condition is silently false, CONFIG_SPI/CONFIG_I2C never get selected by
+# this driver, and a node on a bus nothing else enabled fails at link time
+# with an undefined __device_dts_ord_N for the bus controller. (Plain symbol
+# references such as `depends on DT_HAS_..._ENABLED` resolve lazily and are
+# unaffected -- only the $(...) form has this ordering requirement.)
+rsource "drivers/sensor/l3gd20/Kconfig"

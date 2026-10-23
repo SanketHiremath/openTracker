@@ -1,0 +1,11 @@
+# SPDX-License-Identifier: Apache-2.0
+
+description: |
+    STMicroelectronics L3GD20 3-axis gyroscope accessed through SPI
+
+    4-wire SPI mode 3 (CPOL=1, CPHA=1), MSB first, up to 10 MHz. The 3-wire
+    mode (CTRL_REG4.SIM) is not supported.
+
+compatible: "st,l3gd20"
+
+include: ["spi-device.yaml", "st,l3gd20-common.yaml"]

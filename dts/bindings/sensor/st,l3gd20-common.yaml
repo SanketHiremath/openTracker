@@ -1,0 +1,35 @@
+# SPDX-License-Identifier: Apache-2.0
+
+description: |
+    Properties shared by the I2C and SPI flavours of the STMicroelectronics
+    L3GD20 3-axis gyroscope (see st,l3gd20-i2c.yaml / st,l3gd20-spi.yaml).
+
+    I2C address is 0x6A with the SDO pin low, 0x6B with it high.
+
+    Not supported by this binding: the L3GD20H (WHO_AM_I 0xD7, different
+    register layout) and the I3G4250D (WHO_AM_I 0xD3; has its own in-tree
+    driver, compatible "st,i3g4250d"). The driver rejects both at probe time.
+
+include: sensor-device.yaml
+
+properties:
+  gyro-range-dps:
+    type: int
+    default: 250
+    enum: [250, 500, 2000]
+    description: |
+      Initial full-scale range in degrees per second. Sensitivity is
+      8.75 / 17.5 / 70 mdps per LSB respectively, so the narrowest range
+      that covers the expected rotation rate gives the best resolution.
+      Can be changed at runtime with SENSOR_ATTR_FULL_SCALE.
+
+  gyro-odr-hz:
+    type: int
+    default: 95
+    enum: [95, 190, 380, 760]
+    description: |
+      Initial output data rate in Hz. The low-pass bandwidth is always set
+      to the device's widest setting for the chosen rate (25 / 70 / 100 /
+      100 Hz respectively), so the cutoff tracks the rate rather than being
+      configured separately. Can be changed at runtime with
+      SENSOR_ATTR_SAMPLING_FREQUENCY.
