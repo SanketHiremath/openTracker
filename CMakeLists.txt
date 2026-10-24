@@ -19,6 +19,14 @@ target_sources(app PRIVATE
   src/services/fw_update.cpp
 )
 
+# gps_task.cpp counts a GGA/RMC line as proof the GPS link is alive before the
+# driver parses it (a receiver with no time/fix never reaches the gnss data
+# callback). The wrap redirects the in-tree driver's match table to those hooks.
+zephyr_ld_options(
+  -Wl,--wrap=gnss_nmea0183_match_gga_callback
+  -Wl,--wrap=gnss_nmea0183_match_rmc_callback
+)
+
 # fw_update.cpp calls bootutil's boot_set_next() to mark the inactive A/B slot
 # pending; the library target also carries the bootutil/ include path.
 if(CONFIG_MCUBOOT_BOOTUTIL_LIB)

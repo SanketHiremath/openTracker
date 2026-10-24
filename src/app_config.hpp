@@ -130,8 +130,11 @@ inline constexpr std::uint32_t kPublishRetryBaseDelayS = 5; /* 5s, 10s, 20s */
  * Watchdog
  * ------------------------------------------------------------------ */
 
-/* Must exceed kSupervisorTick by a wide margin so normal scheduling jitter
- * never trips a reset. Only a genuinely stuck supervisor should reboot us.
+/* Hardware watchdog timeout. This is the task watchdog's hardware fallback,
+ * so it is set by CONFIG_TASK_WDT_MIN_TIMEOUT + CONFIG_TASK_WDT_HW_FALLBACK_DELAY
+ * in the prj*.conf files; supervisor_task.cpp static_asserts the two agree.
+ * The task watchdog feeds it from the kernel timer, so only a wedged kernel
+ * (interrupts held off, timer ISR dead) lets it fire.
  */
 inline constexpr std::uint32_t kWatchdogTimeoutMs = 10000;
 
@@ -215,6 +218,54 @@ inline constexpr std::uint8_t kImuSleepIntThsReg = 6;
 inline constexpr std::uint8_t kImuSleepIntDurReg = 2;
 
 /* ---------------------------------------------------------------------
+ * Task watchdog channels (see supervisor_task.hpp)
+ *
+ * Each monitored thread owns a channel and must feed it within its timeout or
+ * the SoC is reset. Timeouts are sized to the longest legitimate stretch the
+ * thread can go without reaching its feed point, with margin, so that only a
+ * thread that is truly stuck (deadlocked, waiting on a dead peripheral) trips
+ * one. Threads that block on something that can legitimately take long wake on
+ * kTaskWdtPoll instead of waiting out the whole thing, purely to feed.
+ * ------------------------------------------------------------------ */
+
+inline constexpr std::uint32_t kSupervisorWdtMs = 5000; /* feeds every kSupervisorTick */
+
+/* GPS: the receiver emits GGA/RMC every second, fix or no fix, so thirty
+ * seconds without a single line means the receiver or its UART is dead. The
+ * thread waits kGpsSampleWait per attempt and feeds when a sample arrived or,
+ * with no sample (no time/fix yet), when a NMEA line was seen within that wait.
+ */
+inline constexpr std::uint32_t kGpsWdtMs = 30000;
+inline constexpr k_timeout_t kGpsSampleWait = K_SECONDS(5);
+
+/* BLE: event driven, and with no GPS fix there may be no events for a long
+ * time, so this proves the thread is scheduled and not stuck in a call, not
+ * that data is flowing. It wakes every kBleIdleWake to feed.
+ */
+inline constexpr std::uint32_t kBleWdtMs = 30000;
+inline constexpr k_timeout_t kBleIdleWake = K_SECONDS(10);
+
+/* Power: wakes at least once a minute (power_task.cpp). The slowest stretch
+ * between feeds is the sleep sequence: modem power-down (~22 s), fed between
+ * every step, with the cell_active wait fed every kTaskWdtPoll.
+ */
+inline constexpr std::uint32_t kPowerWdtMs = 120000;
+
+/* Cellular: the longest legitimate stretch between feeds is one transmission,
+ * kCellSessionMaxMs plus the one stage that may overrun it. That is exactly
+ * what the power task allows for in kCellLockWaitMs, plus a minute of margin so
+ * the power task gives up on a stuck session (and logs it) before the reset.
+ * The wait for cell_active and the idle wait between publishes feed every
+ * kTaskWdtPoll.
+ */
+inline constexpr std::uint32_t kCellularWdtMs = static_cast<std::uint32_t>(kCellLockWaitMs) + 60000U;
+
+/* Longest a monitored thread blocks in one call when the wait can be long
+ * (a mutex, a sleep between publishes) -- well inside every timeout above.
+ */
+inline constexpr std::int64_t kTaskWdtPollMs = 30 * 1000;
+
+/* ---------------------------------------------------------------------
  * Threads
  *
  * Zephyr preemptive priorities: LOWER number == HIGHER priority. Assigned by
@@ -284,9 +335,10 @@ inline constexpr std::uint32_t kBleSubQueueDepth = 4;
  * Self-test (boot-time GPS/cellular liveness check)
  * ------------------------------------------------------------------ */
 
-/* How long to wait for the first NMEA sentence from the GPS module before
- * declaring the GPS self-test check failed. Sentences arrive ~1x/sec once
- * the receiver is powered, so this is comfortably clear of that.
+/* How long to wait for the first NMEA GGA/RMC line from the GPS module before
+ * declaring the GPS self-test check failed. Lines arrive ~1x/sec once the
+ * receiver is powered, with or without time or a fix, so this is comfortably
+ * clear of that. It checks the link only, not satellite reception.
  */
 inline constexpr k_timeout_t kSelftestGpsTimeout = K_SECONDS(5);
 

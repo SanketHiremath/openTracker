@@ -51,6 +51,7 @@
 #include "../channels.hpp"
 #include "../messages.hpp"
 #include "ble_task.hpp"
+#include "supervisor_task.hpp"
 
 LOG_MODULE_REGISTER(ct_ble, CT_LOG_LEVEL);
 
@@ -229,10 +230,20 @@ void ble_thread_entry(void *, void *, void *)
 {
 	LOG_INF("BLE task started");
 
+	const int wdt = ct::supervisor::watch(ct::config::kBleWdtMs);
+
 	for (;;) {
 		const zbus_channel *chan = nullptr;
 
-		if (zbus_sub_wait(&ble_sub, &chan, K_FOREVER) != 0) {
+		/* Events can be rare (no fix, nothing moving), so wake periodically
+		 * just to feed: this proves the thread is not stuck in a call below,
+		 * not that data is flowing.
+		 */
+		const int wait_err = zbus_sub_wait(&ble_sub, &chan, ct::config::kBleIdleWake);
+
+		ct::supervisor::feed(wdt);
+
+		if (wait_err != 0) {
 			continue;
 		}
 

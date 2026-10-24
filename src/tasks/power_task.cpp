@@ -69,6 +69,7 @@
 #include "gps_task.hpp"
 #include "imu_task.hpp"
 #include "power_task.hpp"
+#include "supervisor_task.hpp"
 
 LOG_MODULE_REGISTER(ct_power, CT_LOG_LEVEL);
 
@@ -150,6 +151,14 @@ const device *const kModemRail = DEVICE_DT_GET(DT_ALIAS(modem_power));
 K_THREAD_STACK_DEFINE(power_stack, ct::config::kPowerStackSize);
 k_thread power_thread_data;
 
+/* Task watchdog channel; set and used only by the power thread. */
+int power_wdt = -1;
+
+void feed_watchdog()
+{
+	ct::supervisor::feed(power_wdt);
+}
+
 bool moved_since_expiry()
 {
 	return atomic_get(&motion_since_expiry) != 0;
@@ -205,11 +214,27 @@ void try_sleep()
 	 * rather than slow: give up on this attempt (the caller starts a fresh idle
 	 * period) instead of waiting for it forever.
 	 */
-	if (k_mutex_lock(&cell_active, K_MSEC(ct::config::kCellLockWaitMs)) != 0) {
-		LOG_WRN("not sleeping: cellular task held cell_active for over %d s",
-			static_cast<int>(ct::config::kCellLockWaitMs / 1000));
-		return;
+	const std::int64_t lock_deadline_ms = k_uptime_get() + ct::config::kCellLockWaitMs;
+
+	for (;;) {
+		/* In slices, so the watchdog keeps being fed through a long wait. */
+		const std::int64_t left_ms = lock_deadline_ms - k_uptime_get();
+
+		if (left_ms <= 0) {
+			LOG_WRN("not sleeping: cellular task held cell_active for over %d s",
+				static_cast<int>(ct::config::kCellLockWaitMs / 1000));
+			return;
+		}
+
+		feed_watchdog();
+
+		if (k_mutex_lock(&cell_active,
+				 K_MSEC(MIN(left_ms, ct::config::kTaskWdtPollMs))) == 0) {
+			break;
+		}
 	}
+
+	feed_watchdog();
 
 	if (moved_since_expiry()) {
 		LOG_INF("not sleeping: motion while waiting for the modem");
@@ -225,6 +250,8 @@ void try_sleep()
 	}
 #endif
 
+	feed_watchdog();
+
 	if (const int err = ct::imu::prepare_for_sleep(); err != 0) {
 		LOG_WRN("not sleeping: wake source unavailable (%d)", err);
 		release_cell();
@@ -237,6 +264,8 @@ void try_sleep()
 		release_cell();
 		return;
 	}
+
+	feed_watchdog();
 
 	LOG_INF("entering System OFF; wake on accelerometer INT1");
 
@@ -267,9 +296,15 @@ void power_thread_entry(void *, void *, void *)
 
 	restart_idle_timer(K_MSEC(ct::config::kIdleSleepMs));
 
+	power_wdt = ct::supervisor::watch(ct::config::kPowerWdtMs);
+
 	for (;;) {
 		/* Wake once a minute just to say why not asleep yet (diagnostic). */
-		if (k_sem_take(&sleep_now, K_SECONDS(60)) != 0) {
+		const int wait_err = k_sem_take(&sleep_now, K_SECONDS(60));
+
+		feed_watchdog();
+
+		if (wait_err != 0) {
 			LOG_INF("awake: idle timer %u s left, selftest=%d staging=%d cell_active=%s",
 				static_cast<unsigned>(k_ticks_to_ms_floor64(
 					k_timer_remaining_ticks(&idle_timer)) / 1000),

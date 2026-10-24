@@ -3,7 +3,8 @@
 namespace ct::selftest {
 
 /* Runs the boot-time self-test: verifies the MCU can talk to both the GPS
- * (NMEA presence on uart0 -- see ct::gps::wait_for_first_sample()) and the
+ * (any GGA/RMC line on uart0, fix or not -- see
+ * ct::gps::wait_for_first_sample()) and the
  * cellular modem (AT/OK on uart1 -- see eg916q_selftest() in the modem
  * driver). Blocking; call once from main() before starting the GPS/
  * cellular tasks.

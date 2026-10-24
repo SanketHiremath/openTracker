@@ -28,7 +28,8 @@
  *   Cellular   - decides when to publish (cadence + retry/backoff) *and*
  *                executes it; owns all long blocking I/O
  *   BLE        - identification/status; never broadcasts location (see ble_task.cpp)
- *   Supervisor - hardware watchdog only; must stay responsive
+ *   Supervisor - the watchdog only; each task above registers a channel with it
+ *                and feeds it from its own loop, so a hung task resets the SoC
  *
  * Memory: everything is statically allocated (thread stacks, queues, channel
  * storage). No heap, no exceptions, no RTTI -- see prj.conf.
@@ -73,24 +74,24 @@ int main()
 		IS_ENABLED(CONFIG_CAR_TRACKER_GPS_ONLY) ? "GPS-only" : "full",
 		ct::config::kFirmwareVersion);
 
-	/* BLE first and unconditionally: it is an independent identification
+	/* First of all: it arms the watchdog, and every other task registers its
+	 * own watchdog channel as it starts, so the watchdog has to exist before
+	 * any of them. It also keeps the watchdog live and fed for the entire
+	 * (blocking, potentially tens-of-seconds) self-test below. It has no
+	 * dependency on GPS/cellular -- it doesn't touch zbus at all.
+	 */
+	ct::supervisor::start();
+
+	/* BLE next and unconditionally: it is an independent identification
 	 * aid, so it must not be gated behind GPS or cellular coming up.
 	 */
 	if (const int err = ct::ble::start(); err != 0) {
 		LOG_WRN("BLE unavailable (%d); continuing", err);
 	}
 
-	/* Started before the (blocking, potentially tens-of-seconds) self-test
-	 * below so the watchdog is live and feeding for the entire self-test
-	 * window, not just after it. Supervisor has no dependency on GPS/
-	 * cellular being started first -- it doesn't touch zbus at all, only
-	 * its own watchdog.
-	 */
-	ct::supervisor::start();
-
 	/* Started before the self-test, not after: start() is what resumes the
 	 * GNSS device (see the PM_DEVICE note there), and until that happens
-	 * uart0 RX is never opened and the self-test's NMEA check could only
+	 * uart0 RX is never opened and the self-test's NMEA-line check could only
 	 * ever time out. Starting the task early is safe -- its loop parks on
 	 * the self-test gate, which is the whole point of gating the loop
 	 * rather than the thread creation.

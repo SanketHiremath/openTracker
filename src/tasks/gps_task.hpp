@@ -9,8 +9,8 @@ namespace ct::gps {
  */
 int start();
 
-/* Blocks until the first NMEA sentence (GGA/RMC, fix or no-fix) has been
- * observed on uart0, or `timeout` elapses. Independent of start()/the
+/* Blocks until the first NMEA GGA/RMC sentence has been observed on uart0
+ * -- whether or not it carries time or a fix (see the hooks in gps_task.cpp), or `timeout` elapses. Independent of start()/the
  * normal fix pipeline -- used by the boot self-test to verify the MCU can
  * talk to the GPS module before anything else touches it. Returns 0 if a
  * sentence arrived in time, -EAGAIN on timeout (see k_sem_take()).

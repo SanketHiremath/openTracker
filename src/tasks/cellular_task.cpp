@@ -46,6 +46,7 @@
 #include "../services/modem_link.hpp"
 #include "../services/selftest.hpp"
 #include "cellular_task.hpp"
+#include "supervisor_task.hpp"
 
 LOG_MODULE_REGISTER(ct_cellular, CT_LOG_LEVEL);
 
@@ -333,6 +334,30 @@ std::span<const char> format_thingspeak_payload(const ct::GpsFix &fix, std::span
 	return {buffer.data(), static_cast<std::size_t>(len)};
 }
 
+/* Takes cell_active, feeding the watchdog while it waits: the power task holds
+ * it through the whole shutdown sequence, which can outlast a feed interval.
+ */
+void lock_cell_active(int wdt)
+{
+	do {
+		ct::supervisor::feed(wdt);
+	} while (k_mutex_lock(&cell_active, K_MSEC(ct::config::kTaskWdtPollMs)) != 0);
+}
+
+/* k_sleep() for the idle gap between publishes, in slices that feed the
+ * watchdog -- the gap is longer than the task's timeout.
+ */
+void sleep_feeding(int wdt, k_timeout_t total)
+{
+	const std::int64_t end_ms = k_uptime_get() + k_ticks_to_ms_floor64(total.ticks);
+
+	for (std::int64_t left_ms = end_ms - k_uptime_get(); left_ms > 0;
+	     left_ms = end_ms - k_uptime_get()) {
+		ct::supervisor::feed(wdt);
+		k_sleep(K_MSEC(MIN(left_ms, ct::config::kTaskWdtPollMs)));
+	}
+}
+
 /* --- Signal/ping/HTTP-GET bench debug loop (TEMPORARY, see the #if 0 block
  * above) --- just powers the modem on and logs AT+CSQ + a ping + an HTTP GET
  * to www.google.com every kMovingPublishInterval, ignoring motion state/publish scheduling
@@ -349,7 +374,16 @@ void cellular_thread_entry(void *, void *, void *)
 
 	ct::selftest::wait_cellular_ready();
 
+	/* Registered only now: before the gate opens this thread is parked on
+	 * purpose, which is not a hang. From here every pass round the loop must
+	 * come back to a feed within kCellularWdtMs -- one transmission, bounded by
+	 * kCellSessionMaxMs plus an overrunning stage, is the longest stretch.
+	 */
+	const int wdt = ct::supervisor::watch(ct::config::kCellularWdtMs);
+
 	for (;;) {
+		ct::supervisor::feed(wdt);
+
 #if 0
 		const int ping_err = ct::modem::ping();
 
@@ -372,7 +406,7 @@ void cellular_thread_entry(void *, void *, void *)
 
 		if (zbus_chan_read(&chan_gps_fix, &fix, K_MSEC(50)) != 0 || !fix.valid) {
 			LOG_WRN("mqtt publish: no GPS fix yet, skipping this round");
-			k_sleep(K_SECONDS(5));
+			k_sleep(K_SECONDS(10));
 			continue;
 		}
 
@@ -394,14 +428,18 @@ void cellular_thread_entry(void *, void *, void *)
 		 * and sleep instead of the device chasing a signal indefinitely.
 		 * Blocks here while the power task is shutting down for sleep.
 		 */
-		(void)k_mutex_lock(&cell_active, K_FOREVER);
+		lock_cell_active(wdt);
 		announce_modem_session(true);
+
+		/* Full timeout for the transmission, however long the lock wait took. */
+		ct::supervisor::feed(wdt);
 
 		const int mqtt_err = ct::modem::publish_telemetry(
 			payload, k_uptime_get() + ct::config::kCellSessionMaxMs);
 
 		announce_modem_session(false);
 		(void)k_mutex_unlock(&cell_active);
+		ct::supervisor::feed(wdt);
 
 		if (mqtt_err == 0) {
 			LOG_INF("mqtt publish: OK");
@@ -416,7 +454,7 @@ void cellular_thread_entry(void *, void *, void *)
 		 * paths above keep their short 5 s retry so the first publish goes
 		 * out as soon as a fix arrives.
 		 */
-		k_sleep(ct::config::kMovingPublishInterval);
+		sleep_feeding(wdt, ct::config::kMovingPublishInterval);
 	}
 }
 

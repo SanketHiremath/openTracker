@@ -15,6 +15,14 @@
  * non-blocking k_msgq_put and this task does the actual publish. That keeps
  * the driver's context free and makes back-pressure explicit (a full queue
  * drops the oldest sample rather than stalling the driver).
+ *
+ * Liveness vs. fix: the driver only delivers a sample (the callback above)
+ * once GGA and RMC both carry a parseable UTC, so a receiver that is
+ * searching with no time yet delivers none. Link liveness is therefore
+ * tracked separately, from linker-wrapped GGA/RMC match callbacks (see the
+ * __wrap_ hooks and CMakeLists.txt): the boot self-test passes on any GGA/RMC
+ * line, and the GPS watchdog is fed by a sample *or* a recent NMEA line, so
+ * "no fix yet" never reboots the device -- only a silent UART does.
  */
 
 #include <cstdint>
@@ -26,6 +34,7 @@
 #include <zephyr/drivers/uart.h>
 #include <zephyr/data/navigation.h>
 #include <zephyr/logging/log.h>
+#include <zephyr/modem/chat.h>
 #include <zephyr/pm/device.h>
 #include <zephyr/sys/atomic.h>
 #include <zephyr/zbus/zbus.h>
@@ -36,6 +45,7 @@
 #include "gps_task.hpp"
 
 #include "../services/selftest.hpp"
+#include "supervisor_task.hpp"
 
 LOG_MODULE_REGISTER(ct_gps, CT_LOG_LEVEL);
 
@@ -125,12 +135,23 @@ void ubx_send(std::uint8_t cls, std::uint8_t id, const std::uint8_t *payload, st
 K_MSGQ_DEFINE(gps_raw_queue, sizeof(ct::GpsFix), ct::config::kGpsRawQueueDepth,
 	      alignof(ct::GpsFix));
 
-/* Given once, the first time gnss_data_cb below observes any NMEA sentence
- * (fix or no-fix) -- proof the MCU<->GPS UART link is alive. Consumed by
+/* Given the first time a GGA or RMC line arrives, whether or not it carries
+ * time or a fix -- proof the MCU<->GPS UART link is alive. Consumed by
  * ct::gps::wait_for_first_sample(), which the boot self-test calls. This is
  * independent of gps_raw_queue above (which feeds the normal fix pipeline).
+ * Given from the __wrap_ GGA/RMC hooks below, NOT from gnss_data_cb: the
+ * driver only calls gnss_data_cb once a GGA and an RMC with a parseable,
+ * matching UTC have both arrived, and a receiver without time or fix sends
+ * empty time fields, so a no-fix link would never reach the callback.
  */
 K_SEM_DEFINE(gps_first_sample_sem, 0, 1);
+
+/* k_uptime_get_32() of the most recent GGA/RMC line, written by the __wrap_
+ * hooks below. Lets the GPS thread tell "receiver alive but no time/fix yet"
+ * (no gnss_data_cb samples, but lines still arriving) from "receiver or UART
+ * dead" (nothing arriving), so only the latter stops the watchdog feed.
+ */
+atomic_t gps_last_nmea_ms = ATOMIC_INIT(0);
 
 /* Set once the GPS thread is actually draining gps_raw_queue. Until then the
  * driver callback throws samples away rather than queueing them -- see
@@ -194,19 +215,45 @@ void publish_motion(bool moving)
 	(void)zbus_chan_pub(&chan_motion_state, &state, K_MSEC(50));
 }
 
+} /* namespace */
+
+/* Link-liveness hooks. CMakeLists.txt links with --wrap on the driver's GGA
+ * and RMC match callbacks, so the driver's unsolicited-match table calls
+ * these instead. They run on every matched line *before* the driver parses
+ * it, which makes the boot self-test's "NMEA is arriving" check independent
+ * of whether the receiver has time or a fix yet. Runs on the modem chat
+ * workqueue: must not block (k_sem_give is safe; extra gives beyond the
+ * semaphore's limit of 1 are a documented no-op).
+ */
+extern "C" {
+void __real_gnss_nmea0183_match_gga_callback(struct modem_chat *chat, char **argv,
+					     uint16_t argc, void *user_data);
+void __real_gnss_nmea0183_match_rmc_callback(struct modem_chat *chat, char **argv,
+					     uint16_t argc, void *user_data);
+
+void __wrap_gnss_nmea0183_match_gga_callback(struct modem_chat *chat, char **argv,
+					     uint16_t argc, void *user_data)
+{
+	atomic_set(&gps_last_nmea_ms, static_cast<atomic_val_t>(k_uptime_get_32()));
+	k_sem_give(&gps_first_sample_sem);
+	__real_gnss_nmea0183_match_gga_callback(chat, argv, argc, user_data);
+}
+
+void __wrap_gnss_nmea0183_match_rmc_callback(struct modem_chat *chat, char **argv,
+					     uint16_t argc, void *user_data)
+{
+	atomic_set(&gps_last_nmea_ms, static_cast<atomic_val_t>(k_uptime_get_32()));
+	k_sem_give(&gps_first_sample_sem);
+	__real_gnss_nmea0183_match_rmc_callback(chat, argv, argc, user_data);
+}
+}
+
+namespace {
+
 /* Runs in GNSS driver (workqueue) context -- must not block. */
 void gnss_data_cb(const struct device *dev, const struct gnss_data *data)
 {
 	ARG_UNUSED(dev);
-
-	/* Any sentence at all proves the MCU<->GPS link is alive, valid fix or
-	 * not. Given before the consumer check below so the boot self-test can
-	 * verify the link while the GPS task is still parked on its gate.
-	 *
-	 * Extra gives beyond the semaphore's limit of 1 are a documented no-op
-	 * in Zephyr, so it's safe to call this on every sample.
-	 */
-	k_sem_give(&gps_first_sample_sem);
 
 	/* The GPS thread parks on the self-test gate before entering its loop,
 	 * so until it starts draining there is no consumer. Queueing anyway
@@ -255,13 +302,38 @@ void gps_thread_entry(void *, void *, void *)
 	MotionDetector motion;
 	publish_motion(false);
 
+	/* From here the receiver must keep talking: it emits GGA/RMC every second,
+	 * fix or no fix. A sample, or a bare NMEA line while the receiver has no
+	 * time/fix yet, feeds the watchdog; silence (dead receiver or UART)
+	 * does not, so the board resets instead of this thread waiting forever.
+	 */
+	const int wdt = ct::supervisor::watch(ct::config::kGpsWdtMs);
+
 	for (;;) {
 		ct::GpsFix fix{};
 
-		/* Blocks until the driver produces a sample. */
-		if (k_msgq_get(&gps_raw_queue, &fix, K_FOREVER) != 0) {
+		if (k_msgq_get(&gps_raw_queue, &fix, ct::config::kGpsSampleWait) != 0) {
+			/* No sample, but samples only exist once the receiver has time
+			 * or a fix. If NMEA lines are still arriving the hardware is
+			 * fine and the receiver is just searching (cold start, no sky
+			 * view): keep feeding, or the device would reboot-loop until
+			 * it got a fix.
+			 */
+			const std::uint32_t nmea_age_ms =
+				k_uptime_get_32() - static_cast<std::uint32_t>(atomic_get(&gps_last_nmea_ms));
+
+			if (nmea_age_ms < k_ticks_to_ms_floor32(ct::config::kGpsSampleWait.ticks)) {
+				ct::supervisor::feed(wdt);
+				LOG_INF("GPS searching: NMEA alive, no time/fix yet");
+				continue;
+			}
+
+			LOG_WRN("no GPS sample for %d s", static_cast<int>(
+				k_ticks_to_ms_floor64(ct::config::kGpsSampleWait.ticks) / 1000));
 			continue;
 		}
+
+		ct::supervisor::feed(wdt);
 
 		if (motion.update(fix)) {
 			LOG_INF(">>> %s <<<", motion.moving() ? "MOVING" : "parked");
